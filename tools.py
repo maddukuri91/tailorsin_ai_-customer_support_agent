@@ -7,9 +7,32 @@ gives you the full list to pass into create_agent.
 """
 import requests
 from datetime import datetime, timedelta
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from langchain_core.tools import tool
+from config import REQUEST_TIMEOUT_SECONDS
 
 BASE_URL = "https://crm.tailorsin.com/tailorsin-api/api"
+
+
+def _build_requests_session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    retry_strategy = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+requests_session = _build_requests_session()
 
 
 # ---------------------------------------------------------------------------
@@ -17,7 +40,7 @@ BASE_URL = "https://crm.tailorsin.com/tailorsin-api/api"
 # ---------------------------------------------------------------------------
 def _fetch_saved_addresses(mobile: str):
     """Returns parsed JSON address list, or None if none found / not JSON."""
-    resp = requests.get(f"{BASE_URL}/customeraddress.php", params={"mobile": mobile}, timeout=10)
+    resp = requests_session.get(f"{BASE_URL}/customeraddress.php", params={"mobile": mobile}, timeout=REQUEST_TIMEOUT_SECONDS)
     resp.raise_for_status()
     try:
         addresses = resp.json()
@@ -29,14 +52,14 @@ def _fetch_saved_addresses(mobile: str):
 def _add_new_address(mobile: str, address: str, locality: str, city: str,
                       pincode: str, address2: str = ""):
     """Adds a new address, returns the new address_id (or None on failure)."""
-    resp = requests.post(f"{BASE_URL}/addaddress.php", json={
+    resp = requests_session.post(f"{BASE_URL}/addaddress.php", json={
         "mobile": mobile,
         "address": address,
         "address2": address2,
         "locality": locality,
         "city": city,
         "pincode": pincode
-    }, timeout=10)
+    }, timeout=REQUEST_TIMEOUT_SECONDS)
     resp.raise_for_status()
     data = resp.json()
     return data.get("address_id")
@@ -52,6 +75,25 @@ def _resolve_pickup_date(pickup_day: str):
     }
     chosen = day_map.get(pickup_day.strip().lower())
     return chosen.strftime("%Y-%m-%d") if chosen else None
+
+
+def _fetch_current_orders(mobile: str):
+    """Return a parsed list of current orders for a mobile number, or an empty list."""
+    try:
+        response = requests_session.get(f"{BASE_URL}/orderstatus.php", params={"mobile": mobile}, timeout=REQUEST_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError:
+            return []
+    except requests.exceptions.RequestException:
+        return []
+
+    if isinstance(payload, dict):
+        return payload.get("orders") or payload.get("data") or []
+    if isinstance(payload, list):
+        return payload
+    return []
 
 
 def _resolve_address_or_prompt(mobile, address_id, new_address, new_locality,
@@ -95,7 +137,7 @@ def get_client_type(mobile: str) -> str:
         The client details as returned by the CRM API, or an error message if the lookup fails.
     """
     try:
-        response = requests.get(f"{BASE_URL}/getclient.php", params={"mobile": mobile}, timeout=10)
+        response = requests_session.get(f"{BASE_URL}/getclient.php", params={"mobile": mobile}, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         return response.text
     except requests.exceptions.RequestException as e:
@@ -167,9 +209,9 @@ def register_client(mobile: str, cname: str, email: str) -> str:
         Confirmation of client registration, or an error message if it fails.
     """
     try:
-        response = requests.post(f"{BASE_URL}/addclient.php", json={
+        response = requests_session.post(f"{BASE_URL}/addclient.php", json={
             "mobile": mobile, "cname": cname, "email": email
-        }, timeout=10)
+        }, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         return str(response.json())
     except requests.exceptions.RequestException as e:
@@ -194,9 +236,9 @@ def book_appointment(mobile: str, store_id: int, bookdate: str, booktime: str) -
         Confirmation of the booked appointment, or an error message if booking fails.
     """
     try:
-        response = requests.post(f"{BASE_URL}/bookappointment.php", json={
+        response = requests_session.post(f"{BASE_URL}/bookappointment.php", json={
             "mobile": mobile, "store_id": store_id, "bookdate": bookdate, "booktime": booktime
-        }, timeout=10)
+        }, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         return response.text
     except requests.exceptions.RequestException as e:
@@ -217,7 +259,7 @@ def human_handover(mobile: str) -> str:
         Confirmation that the handover was triggered, or an error message if it fails.
     """
     try:
-        response = requests.post(f"{BASE_URL}/humanhandover.php", params={"mobile": mobile}, timeout=10)
+        response = requests_session.post(f"{BASE_URL}/humanhandover.php", params={"mobile": mobile}, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         return response.text
     except requests.exceptions.RequestException as e:
@@ -300,9 +342,9 @@ def delete_customer_address(mobile: str, address_id: int = 0) -> str:
                      f"one to delete (by address_id), and confirm they really want to "
                      f"delete it before calling delete_customer_address again with that address_id.")
 
-        response = requests.post(f"{BASE_URL}/deleteaddress.php", json={
+        response = requests_session.post(f"{BASE_URL}/deleteaddress.php", json={
             "mobile": mobile, "address_id": address_id
-        }, timeout=10)
+        }, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         return f"Address {address_id} deleted successfully. {response.text}"
     except requests.exceptions.RequestException as e:
@@ -374,12 +416,12 @@ def place_order(
                      "(9 AM-11 AM) or 2 for afternoon (2 PM-5 PM). Then call place_order "
                      "again with pickup_time set, along with address_id and pickup_day.")
 
-        response = requests.post(f"{BASE_URL}/schedulepickup.php", json={
+        response = requests_session.post(f"{BASE_URL}/schedulepickup.php", json={
             "mobile": mobile,
             "pickup_date": pickup_date_str,
             "pickup_time": pickup_time,
             "address_id": resolved_address_id
-        }, timeout=10)
+        }, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         data = response.json()
 
@@ -407,7 +449,7 @@ def get_order_status(mobile: str) -> str:
         The current order status details, or an error message if the lookup fails.
     """
     try:
-        response = requests.get(f"{BASE_URL}/orderstatus.php", params={"mobile": mobile}, timeout=10)
+        response = requests_session.get(f"{BASE_URL}/orderstatus.php", params={"mobile": mobile}, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         return response.text
     except requests.exceptions.RequestException as e:
@@ -429,9 +471,9 @@ def modify_order(mobile: str, order_id: int, comment: str) -> str:
         Confirmation that the modification request was submitted, or an error message.
     """
     try:
-        response = requests.get(f"{BASE_URL}/modifyorder.php", params={
+        response = requests_session.get(f"{BASE_URL}/modifyorder.php", params={
             "mobile": mobile, "comment": comment, "order_id": order_id
-        }, timeout=10)
+        }, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         return response.text
     except requests.exceptions.RequestException as e:
@@ -439,25 +481,56 @@ def modify_order(mobile: str, order_id: int, comment: str) -> str:
 
 
 @tool
-def cancel_order(mobile: str, order_id: int, reason: str) -> str:
+def cancel_order(mobile: str, order_id: int = 0, reason: str = "") -> str:
     """
-    Cancel an existing order. Use this only when the customer explicitly confirms
-    they want to cancel — always double-check with the customer before calling this,
-    since cancellation cannot be undone. Call get_order_status first if you don't
-    already know the order_id.
+    Cancel an existing order. This flow is progressive:
+    1. Fetch the customer's current orders.
+    2. Ask the user to choose one of those orders.
+    3. Ask for a reason.
+    4. Cancel after all details are present.
 
-    Args:
-        mobile: The customer's mobile number, including country code (e.g., "919701667788").
-        order_id: The ID of the order to cancel. Get this from get_order_status if unknown.
-        reason: The customer's reason for cancelling (e.g., "Changed my mind").
-
-    Returns:
-        Confirmation that the order was cancelled, or an error message.
+    If the user provides an invalid order_id, this tool explains that and asks
+    them to choose one of the current orders instead of failing silently.
     """
     try:
-        response = requests.post(f"{BASE_URL}/cancelorder.php", json={
+        if not order_id:
+            orders = _fetch_current_orders(mobile)
+            if not orders:
+                return "NO_ORDERS: This customer has no current orders to cancel. Tell them clearly and do not proceed further."
+
+            order_options = []
+            for idx, order in enumerate(orders[:10], start=1):
+                order_id_value = order.get("order_id") or order.get("id") or order.get("orderId")
+                status = order.get("status") or order.get("stage_label") or order.get("state") or "unknown"
+                label = f"{order_id_value} ({status})" if order_id_value else f"Order {idx} ({status})"
+                if order_id_value is not None:
+                    order_options.append((str(order_id_value), label, ""))
+
+            if not order_options:
+                return "NO_ORDERS: I could not find any usable order IDs to cancel. Ask the customer to confirm their current order first."
+
+            options_chunk = "|".join([f"{opt[0]}:{opt[1]}" for opt in order_options])
+            return (
+                "NEEDS_INFO: Please choose one of your current orders to cancel: "
+                + ", ".join([opt[1] for opt in order_options])
+                + "[SELECT_OPTIONS:cancel_order_order|" + options_chunk + "]"
+                + ". Then call cancel_order again with that order_id and the reason."
+            )
+
+        current_orders = _fetch_current_orders(mobile)
+        valid_order_ids = {
+            str(order.get("order_id") or order.get("id") or order.get("orderId"))
+            for order in current_orders if order.get("order_id") or order.get("id") or order.get("orderId")
+        }
+        if order_id and str(order_id) not in valid_order_ids:
+            return "NEEDS_INFO: The order ID you entered is not one of your current orders. Please choose one of your current orders from the list instead."
+
+        if not reason:
+            return "NEEDS_INFO: Please tell me the reason for cancellation (for example: changed my mind, incorrect fabric, or need to update details). [SELECT_OPTIONS:cancel_order_reason|changed my mind:Changed my mind|incorrect fabric:Incorrect fabric|need to update details:Need to update details]"
+
+        response = requests_session.post(f"{BASE_URL}/cancelorder.php", json={
             "mobile": mobile, "order_id": order_id, "reason": reason
-        }, timeout=10)
+        }, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         return str(response.json())
     except requests.exceptions.RequestException as e:
@@ -512,8 +585,8 @@ def alteration_pickup(
     """
     try:
         if not order_id:
-            elig_resp = requests.get(f"{BASE_URL}/alterationeligibleorders.php",
-                                      params={"mobile": mobile}, timeout=10)
+            elig_resp = requests_session.get(f"{BASE_URL}/alterationeligibleorders.php",
+                                      params={"mobile": mobile}, timeout=REQUEST_TIMEOUT_SECONDS)
             elig_resp.raise_for_status()
             try:
                 eligible_orders = elig_resp.json()
@@ -559,14 +632,14 @@ def alteration_pickup(
                      "(e.g., 'shorten sleeves by 1 inch'). Then call alteration_pickup "
                      "again with notes set, along with everything already collected.")
 
-        response = requests.post(f"{BASE_URL}/alterationpickup.php", json={
+        response = requests_session.post(f"{BASE_URL}/alterationpickup.php", json={
             "mobile": mobile,
             "pickup_date": pickup_date_str,
             "pickup_time": pickup_time,
             "address_id": resolved_address_id,
             "order_id": order_id,
             "notes": notes
-        }, timeout=10)
+        }, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
         data = response.json()
 
@@ -599,7 +672,7 @@ def drop_off_fabric(mobile: str, notes: str) -> str:
         to mark the client ID on the package, or an error message if it fails.
     """
     try:
-        client_resp = requests.get(f"{BASE_URL}/getclient.php", params={"mobile": mobile}, timeout=10)
+        client_resp = requests_session.get(f"{BASE_URL}/getclient.php", params={"mobile": mobile}, timeout=REQUEST_TIMEOUT_SECONDS)
         client_resp.raise_for_status()
         try:
             client_data = client_resp.json()
@@ -607,9 +680,9 @@ def drop_off_fabric(mobile: str, notes: str) -> str:
             client_data = {}
         client_id = client_data.get("client_id")
 
-        response = requests.post(f"{BASE_URL}/fabricdelivery.php", params={
+        response = requests_session.post(f"{BASE_URL}/fabricdelivery.php", params={
             "mobile": mobile, "store_id": 1, "notes": notes
-        }, timeout=10)
+        }, timeout=REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
 
         client_id_line = (

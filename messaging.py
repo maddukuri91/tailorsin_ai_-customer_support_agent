@@ -4,13 +4,46 @@ Kept separate from the webhook handlers so the same functions can be reused
 by a proactive notifier (e.g., "your alteration is ready") outside the
 request/response cycle.
 """
+import asyncio
 import re
 import httpx
-from config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, TELEGRAM_BOT_TOKEN
+from config import WHATSAPP_TOKEN, WHATSAPP_PHONE_NUMBER_ID, TELEGRAM_BOT_TOKEN, REQUEST_TIMEOUT_SECONDS, MAX_MESSAGE_LENGTH
+
+
+_async_client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS, trust_env=False)
 
 
 def _make_async_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=10, trust_env=False)
+    return _async_client
+
+
+async def _post_with_retry(url: str, *, headers=None, json_payload=None, timeout: float | None = None) -> httpx.Response:
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            client = _make_async_client()
+            response = await client.post(
+                url,
+                headers=headers,
+                json=json_payload,
+                timeout=timeout or REQUEST_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            return response
+        except (httpx.TimeoutException, httpx.RequestError) as exc:
+            last_error = exc
+            if attempt == 2:
+                raise
+            await asyncio.sleep(0.5 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Unreachable retry path")
+
+
+async def close_async_client() -> None:
+    """Close the shared async HTTP client during shutdown."""
+    if not _async_client.is_closed:
+        await _async_client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -50,23 +83,20 @@ def _strip_markdown(text: str) -> str:
 async def send_whatsapp_message(to_mobile: str, text: str) -> None:
     url = f"https://graph.facebook.com/v20.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+    body = _strip_markdown(text)[:MAX_MESSAGE_LENGTH]
     payload = {
         "messaging_product": "whatsapp",
         "to": to_mobile,
         "type": "text",
-        "text": {"body": _strip_markdown(text)},
+        "text": {"body": body},
     }
-    async with _make_async_client() as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
+    await _post_with_retry(url, headers=headers, json_payload=payload)
 
 
 async def send_telegram_message(chat_id: str, text: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": _strip_markdown(text)}
-    async with _make_async_client() as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
+    payload = {"chat_id": chat_id, "text": _strip_markdown(text)[:MAX_MESSAGE_LENGTH]}
+    await _post_with_retry(url, json_payload=payload)
 
 
 async def send_whatsapp_menu(to_mobile: str, greeting: str, options) -> None:
@@ -96,9 +126,7 @@ async def send_whatsapp_menu(to_mobile: str, greeting: str, options) -> None:
             },
         },
     }
-    async with _make_async_client() as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
+    await _post_with_retry(url, headers=headers, json_payload=payload)
 
 
 async def send_telegram_menu(chat_id: str, greeting: str, options) -> None:
@@ -107,20 +135,16 @@ async def send_telegram_menu(chat_id: str, greeting: str, options) -> None:
     keyboard = [[{"text": label, "callback_data": opt_id}] for opt_id, label, _intent in options]
     payload = {
         "chat_id": chat_id,
-        "text": greeting,
+        "text": greeting[:MAX_MESSAGE_LENGTH],
         "reply_markup": {"inline_keyboard": keyboard},
     }
-    async with _make_async_client() as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
+    await _post_with_retry(url, json_payload=payload)
 
 
 async def answer_telegram_callback(callback_query_id: str) -> None:
     """Must be called after handling a button tap, or Telegram shows a loading spinner on the button."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
-    async with _make_async_client() as client:
-        resp = await client.post(url, json={"callback_query_id": callback_query_id})
-        resp.raise_for_status()
+    await _post_with_retry(url, json_payload={"callback_query_id": callback_query_id})
 
 
 async def send_telegram_request_contact(chat_id: str, text: str) -> None:
@@ -139,9 +163,7 @@ async def send_telegram_request_contact(chat_id: str, text: str) -> None:
             "one_time_keyboard": True,
         },
     }
-    async with _make_async_client() as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
+    await _post_with_retry(url, json_payload=payload)
 
 
 async def send_telegram_remove_keyboard(chat_id: str, text: str) -> None:
@@ -152,6 +174,4 @@ async def send_telegram_remove_keyboard(chat_id: str, text: str) -> None:
         "text": text,
         "reply_markup": {"remove_keyboard": True},
     }
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
+    await _post_with_retry(url, json_payload=payload)

@@ -16,6 +16,7 @@ import logging
 import time
 import requests
 from dataclasses import dataclass
+from config import CRM_CACHE_TTL_SECONDS, REQUEST_TIMEOUT_SECONDS
 
 logger = logging.getLogger("tailorsin_bot")
 
@@ -24,7 +25,7 @@ BASE_URL = "https://crm.tailorsin.com/tailorsin-api/api"
 # Order statuses that count as "active" for menu purposes — adjust to match
 # whatever your CRM actually returns (e.g. "in_production", "picked_up", etc.)
 ACTIVE_ORDER_STATUSES = {"pending", "in_progress", "in_production", "picked_up", "processing"}
-_CACHE_TTL_SECONDS = 300
+_CACHE_TTL_SECONDS = CRM_CACHE_TTL_SECONDS
 _classification_cache: dict[str, tuple[float, "CustomerProfile"]] = {}
 
 requests_session = requests.Session()
@@ -77,6 +78,10 @@ def _unwrap_data(data: dict, *wrapper_keys: str) -> dict:
 
 def classify_customer(mobile: str) -> CustomerProfile:
     normalized = _normalize_mobile(mobile)
+    if not normalized:
+        logger.info("classify_customer: no mobile provided -> treating as new_user")
+        return CustomerProfile(segment="new_user", name=None, client_id=None)
+
     now = time.time()
     cached = _classification_cache.get(normalized)
     if cached and now - cached[0] < _CACHE_TTL_SECONDS:
@@ -87,7 +92,7 @@ def classify_customer(mobile: str) -> CustomerProfile:
 
     # --- Step 1: Look up client in CRM ---
     try:
-        client_resp = requests_session.get(f"{BASE_URL}/getclient.php", params={"mobile": normalized}, timeout=10)
+        client_resp = requests_session.get(f"{BASE_URL}/getclient.php", params={"mobile": normalized}, timeout=REQUEST_TIMEOUT_SECONDS)
         client_resp.raise_for_status()
         logger.info("getclient.php response status=%s for mobile=%s", client_resp.status_code, normalized)
         client_data = try_parse_json(client_resp, "getclient.php")
@@ -138,7 +143,7 @@ def classify_customer(mobile: str) -> CustomerProfile:
     # --- Step 2: Only needed if CRM doesn't tell us the type ---
     # Check for active orders
     try:
-        order_resp = requests_session.get(f"{BASE_URL}/orderstatus.php", params={"mobile": normalized}, timeout=10)
+        order_resp = requests_session.get(f"{BASE_URL}/orderstatus.php", params={"mobile": normalized}, timeout=REQUEST_TIMEOUT_SECONDS)
         order_resp.raise_for_status()
         logger.info("orderstatus.php response status=%s for mobile=%s", order_resp.status_code, normalized)
         order_data = try_parse_json(order_resp, "orderstatus.php")

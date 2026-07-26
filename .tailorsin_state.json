@@ -1,29 +1,65 @@
 {
   "greeted_threads": [
-    "telegram:8944566321"
+    "telegram:8944566321",
+    "telegram:8214889745",
+    "telegram:919701667788"
   ],
   "handoff_threads": {},
   "last_menu": {
-    "telegram:8944566321": [
+    "telegram:919701667788": [
       [
-        "faq",
-        "\u2139\ufe0f Learn about tailorsin.com",
-        "Tell me about tailorsin.com and how it works"
+        "track_order",
+        "\ud83d\udce6 Track my order",
+        "I want to track my order status"
       ],
       [
-        "register",
-        "\ud83d\udcdd Register to place an order / book a visit",
-        "I want to register as a new customer"
+        "modify_order",
+        "\u270f\ufe0f Modify my order",
+        "I want to modify my order"
+      ],
+      [
+        "cancel_order",
+        "\u274c Cancel my order",
+        "I want to cancel my order"
+      ],
+      [
+        "report_issue",
+        "\ud83e\uddf5 Report an issue / Alteration",
+        "I have an issue with my order and need an alteration"
+      ],
+      [
+        "faq",
+        "\u2753 Frequently asked questions",
+        "I have a question about your services"
+      ],
+      [
+        "book_visit",
+        "\ud83c\udfe0 Book a store visit",
+        "I want to book a store visit appointment"
+      ],
+      [
+        "manage_address",
+        "\ud83d\udccd Manage my addresses",
+        "I want to add or delete a saved address"
+      ],
+      [
+        "human",
+        "\ud83d\ude4b Talk to a human",
+        "I want to speak/chat with a human agent"
       ]
     ]
   },
+  "pending_selection": {},
   "seen_message_ids": {
-    "telegram:8944566321:2997": 1785049907.439035,
-    "telegram:8944566321:3004": 1785049951.536057,
-    "telegram:8944566321:3007": 1785050067.9368162,
-    "telegram:8944566321:3010": 1785050140.1284978
+    "telegram:8214889745:3037": 1785055133.124896,
+    "telegram:8214889745:3040": 1785055177.608779,
+    "telegram:8214889745:3042": 1785055205.342278,
+    "telegram:8214889745:3044": 1785055246.986588,
+    "telegram:8214889745:3046": 1785055290.816074,
+    "telegram:8214889745:3048": 1785055315.5958688
   },
   "telegram_mobile_map": {
+    "8214889745": "919701667788",
     "8944566321": "917287874454"
   }
 }

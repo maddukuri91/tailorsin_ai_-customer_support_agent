@@ -29,17 +29,22 @@ from agent_setup import agent, get_thread_id
 from messaging import (
     send_whatsapp_message, send_telegram_message,
     send_whatsapp_menu, send_telegram_menu, answer_telegram_callback,
-    send_telegram_request_contact, send_telegram_remove_keyboard,
+    send_telegram_request_contact, send_telegram_remove_keyboard, close_async_client,
 )
 from state import (
     is_duplicate_message, is_handed_off, mark_handed_off, clear_handoff,
     has_been_greeted, mark_greeted, is_menu_trigger,
     set_last_menu, get_last_menu,
     set_telegram_mobile, get_telegram_mobile,
+    set_pending_selection, get_pending_selection, clear_pending_selection,
 )
 from customer_segment import classify_customer
 from menu import build_menu, resolve_typed_number, resolve_option_id
-from config import WHATSAPP_VERIFY_TOKEN, TELEGRAM_BOT_TOKEN
+from selection import parse_selection_payload, strip_selection_markers, build_selection_options
+from config import (
+    WHATSAPP_VERIFY_TOKEN, TELEGRAM_BOT_TOKEN, SEND_MENU_AFTER_REPLY,
+    validate_environment,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tailorsin_bot")
@@ -57,6 +62,10 @@ async def configure_telegram_webhook():
     (needed for inline button taps). Without this, Telegram only sends
     'message' updates and button taps are silently dropped.
     """
+    validation_errors = validate_environment()
+    if validation_errors:
+        logger.error("Environment validation failed: %s", "; ".join(validation_errors))
+        raise RuntimeError("Invalid bot environment: " + "; ".join(validation_errors))
     if not TELEGRAM_BOT_TOKEN:
         logger.warning("TELEGRAM_BOT_TOKEN not set — skipping webhook configuration.")
         return
@@ -92,6 +101,11 @@ async def configure_telegram_webhook():
         logger.info("Telegram webhook updated: url=%s, result=%s", current_url, result)
 
 
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    await close_async_client()
+
+
 # ---------------------------------------------------------------------------
 # Shared agent invocation logic
 # ---------------------------------------------------------------------------
@@ -107,7 +121,7 @@ async def send_greeting_menu(platform: str, user_identifier: str, mobile_for_loo
     If is_reply=True, uses a shorter prompt (e.g. "Anything else?") instead
     of the full welcome greeting.
     """
-    thread_id = get_thread_id(platform, user_identifier)
+    thread_id = get_thread_id(platform, user_identifier, customer_mobile=(get_telegram_mobile(user_identifier) if platform == "telegram" else user_identifier))
     profile = classify_customer(mobile_for_lookup)
     greeting, options = build_menu(profile, is_reply=is_reply)
 
@@ -121,7 +135,7 @@ async def send_greeting_menu(platform: str, user_identifier: str, mobile_for_loo
 
 
 async def process_and_reply(platform: str, user_identifier: str, user_text: str) -> None:
-    thread_id = get_thread_id(platform, user_identifier)
+    thread_id = get_thread_id(platform, user_identifier, customer_mobile=(get_telegram_mobile(user_identifier) if platform == "telegram" else user_identifier))
 
     if is_handed_off(thread_id):
         logger.info("Thread %s is handed off to a human — skipping bot reply.", thread_id)
@@ -148,6 +162,19 @@ async def process_and_reply(platform: str, user_identifier: str, user_text: str)
         mobile_for_lookup = get_telegram_mobile(user_identifier) if platform == "telegram" else user_identifier
         await send_greeting_menu(platform, user_identifier, mobile_for_lookup=mobile_for_lookup)
         return
+
+    pending = get_pending_selection(thread_id)
+    if pending:
+        selection_type = pending.get("type")
+        payload = pending.get("payload", {})
+        if selection_type == "cancel_order_order" and user_text:
+            payload["order_id"] = user_text
+            clear_pending_selection(thread_id)
+            user_text = f"cancel_order mobile={payload.get('mobile')} order_id={payload['order_id']} reason={payload.get('reason', '')}"
+        elif selection_type == "cancel_order_reason" and user_text:
+            payload["reason"] = user_text
+            clear_pending_selection(thread_id)
+            user_text = f"cancel_order mobile={payload.get('mobile')} order_id={payload['order_id']} reason={payload['reason']}"
 
     # Typed a plain number matching the last shown menu (e.g. "1") — resolve
     # to that option's intent text instead of sending the raw digit to the LLM
@@ -189,6 +216,12 @@ async def process_and_reply(platform: str, user_identifier: str, user_text: str)
         )
         reply_text = result["messages"][-1].content
 
+        if "cancel_order" in user_text.lower() and "needs_info" not in reply_text.lower() and "no_orders" not in reply_text.lower():
+            selection = parse_selection_payload(reply_text)
+            if selection:
+                set_pending_selection(thread_id, selection["type"], {"mobile": customer_mobile or user_identifier})
+                reply_text = strip_selection_markers(reply_text)
+
         # simple heuristic: if the agent itself triggered human_handover,
         # flag the thread so the bot stops responding until a human clears it
         if "human_handover" in str(result["messages"][-2:]).lower():
@@ -209,7 +242,7 @@ async def process_and_reply(platform: str, user_identifier: str, user_text: str)
     else:
         send_reply_task = None
 
-    if should_send_menu:
+    if should_send_menu and SEND_MENU_AFTER_REPLY:
         mobile_for_lookup = get_telegram_mobile(user_identifier) if platform == "telegram" else user_identifier
         profile = classify_customer(mobile_for_lookup)
         greeting, options = build_menu(profile, is_reply=True)
@@ -321,7 +354,8 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     if callback_query:
         chat_id = str(callback_query["message"]["chat"]["id"])
         tapped_id = callback_query["data"]
-        thread_id = get_thread_id("telegram", chat_id)
+        customer_mobile = get_telegram_mobile(chat_id)
+        thread_id = get_thread_id("telegram", chat_id, customer_mobile=customer_mobile)
         intent = resolve_tapped_option(thread_id, tapped_id)
         logger.info("Telegram callback_query: chat_id=%s, tapped_id=%s, resolved_intent=%s",
                     chat_id, tapped_id, intent)
@@ -375,7 +409,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
 @app.post("/admin/clear-handoff")
 async def admin_clear_handoff(platform: str, user_identifier: str):
     """Call this once a human support agent has resolved a handed-off conversation."""
-    thread_id = get_thread_id(platform, user_identifier)
+    thread_id = get_thread_id(platform, user_identifier, customer_mobile=(get_telegram_mobile(user_identifier) if platform == "telegram" else user_identifier))
     clear_handoff(thread_id)
     return {"status": "cleared", "thread_id": thread_id}
 

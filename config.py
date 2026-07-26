@@ -45,3 +45,32 @@ LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "tailorsin_agentic_chatbot")
 # --- Human handoff ---
 # once a thread is handed off, the bot stops auto-responding until cleared
 HANDOFF_TTL_SECONDS = 60 * 60 * 6  # 6 hours
+
+# --- Performance / resilience tuning ---
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("REQUEST_TIMEOUT_SECONDS", "8"))
+CRM_CACHE_TTL_SECONDS = float(os.getenv("CRM_CACHE_TTL_SECONDS", "180"))
+MAX_MENU_OPTIONS = int(os.getenv("MAX_MENU_OPTIONS", "8"))
+SEND_MENU_AFTER_REPLY = os.getenv("SEND_MENU_AFTER_REPLY", "false").lower() == "true"
+MAX_MESSAGE_LENGTH = int(os.getenv("MAX_MESSAGE_LENGTH", "1200"))
+
+
+def validate_environment() -> list[str]:
+    """Return production-startup issues that should be fixed before deployment."""
+    errors: list[str] = []
+
+    if LLM_PROVIDER not in {"ollama", "groq"}:
+        errors.append("LLM_PROVIDER must be either 'ollama' or 'groq'.")
+
+    if LLM_PROVIDER == "groq" and not GROQ_API_KEY:
+        errors.append("GROQ_API_KEY is required when LLM_PROVIDER='groq'.")
+
+    if not TELEGRAM_BOT_TOKEN and not (WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID):
+        errors.append("Set TELEGRAM_BOT_TOKEN or both WHATSAPP_TOKEN and WHATSAPP_PHONE_NUMBER_ID.")
+
+    if WHATSAPP_TOKEN and not WHATSAPP_PHONE_NUMBER_ID:
+        errors.append("WHATSAPP_PHONE_NUMBER_ID is required when WHATSAPP_TOKEN is set.")
+
+    if WHATSAPP_PHONE_NUMBER_ID and not WHATSAPP_TOKEN:
+        errors.append("WHATSAPP_TOKEN is required when WHATSAPP_PHONE_NUMBER_ID is set.")
+
+    return errors

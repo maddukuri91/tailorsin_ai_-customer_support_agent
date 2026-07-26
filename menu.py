@@ -13,6 +13,7 @@ instinct that FAQ/booking/addresses/human-handover are always relevant
 regardless of the customer's order state.
 """
 from customer_segment import CustomerProfile
+from config import MAX_MENU_OPTIONS
 
 SEGMENT_OPTIONS = {
     "active_client": [
@@ -83,7 +84,7 @@ def build_menu(profile: CustomerProfile, is_reply: bool = False):
         options = list(SEGMENT_OPTIONS.get("new_user", []))
     else:
         options = _dedupe_by_id(SEGMENT_OPTIONS.get(profile.segment, []) + COMMON_OPTIONS)
-    return greeting, options
+    return greeting, options[:MAX_MENU_OPTIONS]
 
 
 def render_text_menu(greeting: str, options) -> str:

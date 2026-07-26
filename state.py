@@ -12,6 +12,10 @@ import re
 import time
 from config import HANDOFF_TTL_SECONDS
 
+_PERSIST_DEBOUNCE_SECONDS = 2.0
+_last_persist_time = 0.0
+_dirty_state = False
+
 STATE_FILE = os.getenv("TAILORSIN_STATE_FILE", os.path.join(os.getcwd(), ".tailorsin_state.json"))
 
 
@@ -28,7 +32,20 @@ def _load_state() -> dict:
     return {}
 
 
-def _persist_state() -> None:
+def _mark_state_dirty() -> None:
+    global _dirty_state
+    _dirty_state = True
+
+
+def _persist_state(force: bool = False) -> None:
+    global _dirty_state, _last_persist_time
+    if not force and not _dirty_state:
+        return
+
+    now = time.time()
+    if not force and (now - _last_persist_time) < _PERSIST_DEBOUNCE_SECONDS:
+        return
+
     os.makedirs(os.path.dirname(STATE_FILE) or ".", exist_ok=True)
     payload = {
         "seen_message_ids": _seen_message_ids,
@@ -36,9 +53,12 @@ def _persist_state() -> None:
         "greeted_threads": list(_greeted_threads),
         "last_menu": _last_menu,
         "telegram_mobile_map": _telegram_mobile_map,
+        "pending_selection": _pending_selection,
     }
     with open(STATE_FILE, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2, sort_keys=True)
+    _dirty_state = False
+    _last_persist_time = now
 
 
 _state = _load_state()
@@ -52,6 +72,7 @@ _handoff_threads: dict[str, float] = _state.get("handoff_threads", {})
 _greeted_threads: set[str] = set(_state.get("greeted_threads", []))
 _last_menu: dict[str, list] = _state.get("last_menu", {})
 _telegram_mobile_map: dict[str, str] = _state.get("telegram_mobile_map", {})
+_pending_selection: dict[str, dict] = _state.get("pending_selection", {})
 
 
 def is_duplicate_message(message_id: str) -> bool:
@@ -64,6 +85,7 @@ def is_duplicate_message(message_id: str) -> bool:
     if message_id in _seen_message_ids:
         return True
     _seen_message_ids[message_id] = now
+    _mark_state_dirty()
     _persist_state()
     return False
 
@@ -86,6 +108,7 @@ def _normalize_mobile(mobile: str) -> str:
 
 def mark_handed_off(thread_id: str) -> None:
     _handoff_threads[thread_id] = time.time()
+    _mark_state_dirty()
     _persist_state()
 
 
@@ -103,6 +126,7 @@ def is_handed_off(thread_id: str) -> bool:
 def clear_handoff(thread_id: str) -> None:
     """Call this from an internal/admin endpoint once a human agent resolves the thread."""
     _handoff_threads.pop(thread_id, None)
+    _mark_state_dirty()
     _persist_state()
 
 
@@ -120,6 +144,7 @@ def has_been_greeted(thread_id: str) -> bool:
 
 def mark_greeted(thread_id: str) -> None:
     _greeted_threads.add(thread_id)
+    _mark_state_dirty()
     _persist_state()
 
 
@@ -133,6 +158,7 @@ _last_menu: dict[str, list] = {}
 
 def set_last_menu(thread_id: str, options) -> None:
     _last_menu[thread_id] = options
+    _mark_state_dirty()
     _persist_state()
 
 
@@ -151,8 +177,26 @@ def get_last_menu(thread_id: str):
 def set_telegram_mobile(chat_id: str, mobile: str) -> None:
     normalized_mobile = _normalize_mobile(mobile)
     _telegram_mobile_map[str(chat_id)] = normalized_mobile
+    _mark_state_dirty()
     _persist_state()
 
 
 def get_telegram_mobile(chat_id: str) -> str | None:
     return _telegram_mobile_map.get(str(chat_id)) or None
+
+
+# --- Pending multi-step selection state ---
+def set_pending_selection(thread_id: str, selection_type: str, payload: dict) -> None:
+    _pending_selection[str(thread_id)] = {"type": selection_type, "payload": payload}
+    _mark_state_dirty()
+    _persist_state()
+
+
+def get_pending_selection(thread_id: str) -> dict | None:
+    return _pending_selection.get(str(thread_id))
+
+
+def clear_pending_selection(thread_id: str) -> None:
+    _pending_selection.pop(str(thread_id), None)
+    _mark_state_dirty()
+    _persist_state()
