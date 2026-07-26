@@ -13,6 +13,7 @@ project. Once you have a real sample response from getclient.php and
 orderstatus.php, adjust the field lookups accordingly.
 """
 import logging
+import time
 import requests
 from dataclasses import dataclass
 
@@ -23,6 +24,11 @@ BASE_URL = "https://crm.tailorsin.com/tailorsin-api/api"
 # Order statuses that count as "active" for menu purposes — adjust to match
 # whatever your CRM actually returns (e.g. "in_production", "picked_up", etc.)
 ACTIVE_ORDER_STATUSES = {"pending", "in_progress", "in_production", "picked_up", "processing"}
+_CACHE_TTL_SECONDS = 300
+_classification_cache: dict[str, tuple[float, "CustomerProfile"]] = {}
+
+requests_session = requests.Session()
+requests_session.trust_env = False
 
 
 @dataclass
@@ -71,11 +77,17 @@ def _unwrap_data(data: dict, *wrapper_keys: str) -> dict:
 
 def classify_customer(mobile: str) -> CustomerProfile:
     normalized = _normalize_mobile(mobile)
+    now = time.time()
+    cached = _classification_cache.get(normalized)
+    if cached and now - cached[0] < _CACHE_TTL_SECONDS:
+        logger.info("classify_customer: using cached segment for mobile=%s", normalized)
+        return cached[1]
+
     logger.info("classify_customer: raw mobile=%s, normalized=%s", mobile, normalized)
 
     # --- Step 1: Look up client in CRM ---
     try:
-        client_resp = requests.get(f"{BASE_URL}/getclient.php", params={"mobile": normalized}, timeout=10)
+        client_resp = requests_session.get(f"{BASE_URL}/getclient.php", params={"mobile": normalized}, timeout=10)
         client_resp.raise_for_status()
         logger.info("getclient.php response status=%s for mobile=%s", client_resp.status_code, normalized)
         client_data = try_parse_json(client_resp, "getclient.php")
@@ -95,7 +107,9 @@ def classify_customer(mobile: str) -> CustomerProfile:
 
     if crm_type == "new_user":
         logger.info("classify_customer: CRM says new_user -> returning new_user")
-        return CustomerProfile(segment="new_user", name=None, client_id=None)
+        profile = CustomerProfile(segment="new_user", name=None, client_id=None)
+        _classification_cache[normalized] = (now, profile)
+        return profile
 
     # Extract client details from the nested 'client' object
     client_nested = client_data.get("client")
@@ -110,17 +124,21 @@ def classify_customer(mobile: str) -> CustomerProfile:
 
     if not client_id:
         logger.info("classify_customer: no client_id in nested data -> returning new_user")
-        return CustomerProfile(segment="new_user", name=None, client_id=None)
+        profile = CustomerProfile(segment="new_user", name=None, client_id=None)
+        _classification_cache[normalized] = (now, profile)
+        return profile
 
     # CRM already tells us the type for known customers
     if crm_type in ("active_client", "client"):
         logger.info("classify_customer: using CRM-reported type='%s' directly", crm_type)
-        return CustomerProfile(segment=crm_type, name=name, client_id=client_id)
+        profile = CustomerProfile(segment=crm_type, name=name, client_id=client_id)
+        _classification_cache[normalized] = (now, profile)
+        return profile
 
     # --- Step 2: Only needed if CRM doesn't tell us the type ---
     # Check for active orders
     try:
-        order_resp = requests.get(f"{BASE_URL}/orderstatus.php", params={"mobile": normalized}, timeout=10)
+        order_resp = requests_session.get(f"{BASE_URL}/orderstatus.php", params={"mobile": normalized}, timeout=10)
         order_resp.raise_for_status()
         logger.info("orderstatus.php response status=%s for mobile=%s", order_resp.status_code, normalized)
         order_data = try_parse_json(order_resp, "orderstatus.php")
@@ -138,7 +156,7 @@ def classify_customer(mobile: str) -> CustomerProfile:
         logger.info("classify_customer: order_data is list len=%d, has_active_order=%s",
                     len(order_data), has_active_order)
     elif isinstance(order_data, dict):
-        # CRM wraps orders in {'orders': [...]} or {'data': [...]}
+        # CRM wraps orders in {'orders': [...]} or {'data': [...]} 
         orders = order_data.get("orders") or order_data.get("data")
         if isinstance(orders, list):
             has_active_order = any(
@@ -156,4 +174,6 @@ def classify_customer(mobile: str) -> CustomerProfile:
 
     segment = "active_client" if has_active_order else "client"
     logger.info("classify_customer: final segment=%s for mobile=%s (fallback method)", segment, normalized)
-    return CustomerProfile(segment=segment, name=name, client_id=client_id)
+    profile = CustomerProfile(segment=segment, name=name, client_id=client_id)
+    _classification_cache[normalized] = (now, profile)
+    return profile

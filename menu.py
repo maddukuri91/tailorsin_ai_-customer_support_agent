@@ -26,7 +26,7 @@ SEGMENT_OPTIONS = {
         ("drop_off", "🏬 Drop off fabric at store", "I want to drop off fabric at the store"),
     ],
     "new_user": [
-        ("faq", "ℹ️ Learn about Tailorsin", "Tell me about tailorsin.com and how it works"),
+        ("faq", "ℹ️ Learn about tailorsin.com", "Tell me about tailorsin.com and how it works"),
         ("register", "📝 Register to place an order / book a visit", "I want to register as a new customer"),
     ],
 }
@@ -35,7 +35,7 @@ COMMON_OPTIONS = [
     ("faq", "❓ Frequently asked questions", "I have a question about your services"),
     ("book_visit", "🏠 Book a store visit", "I want to book a store visit appointment"),
     ("manage_address", "📍 Manage my addresses", "I want to add or delete a saved address"),
-    ("human", "🙋 Talk to a human", "I want to speak with a human agent"),
+    ("human", "🙋 Talk to a human", "I want to speak/chat with a human agent"),
 ]
 
 
@@ -74,7 +74,7 @@ def build_menu(profile: CustomerProfile, is_reply: bool = False):
         greetings = {
             "active_client": f"Welcome back{name_part}! 👋 Looks like you have an order with us. What would you like to do?",
             "client": f"Hi{name_part}! 👋 Great to see you again. What can I help you with today?",
-            "new_user": "Hi there! 👋 Welcome to Tailorsin — quick e-tailoring, pickup to delivery in 24 hours. How can I help?",
+            "new_user": "Hi there! 👋 Welcome to tailorsin.com — quick e-tailoring, pickup to delivery in 24 hours. How can I help?",
         }
     greeting = greetings.get(profile.segment, "Hi! 👋 How can I help you today?")
 

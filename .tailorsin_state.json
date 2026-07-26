@@ -1,0 +1,29 @@
+{
+  "greeted_threads": [
+    "telegram:8944566321"
+  ],
+  "handoff_threads": {},
+  "last_menu": {
+    "telegram:8944566321": [
+      [
+        "faq",
+        "\u2139\ufe0f Learn about tailorsin.com",
+        "Tell me about tailorsin.com and how it works"
+      ],
+      [
+        "register",
+        "\ud83d\udcdd Register to place an order / book a visit",
+        "I want to register as a new customer"
+      ]
+    ]
+  },
+  "seen_message_ids": {
+    "telegram:8944566321:2997": 1785049907.439035,
+    "telegram:8944566321:3004": 1785049951.536057,
+    "telegram:8944566321:3007": 1785050067.9368162,
+    "telegram:8944566321:3010": 1785050140.1284978
+  },
+  "telegram_mobile_map": {
+    "8944566321": "917287874454"
+  }
+}

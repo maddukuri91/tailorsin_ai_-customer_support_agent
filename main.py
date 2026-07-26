@@ -15,10 +15,15 @@ Architecture:
     4. If a thread has been handed off to a human, the bot skips processing
        entirely until cleared.
 """
+import asyncio
 import logging
+import os
 from fastapi import FastAPI, Request, BackgroundTasks, Query, HTTPException
 from fastapi.responses import PlainTextResponse
 import httpx
+
+for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    os.environ.pop(_proxy_var, None)
 
 from agent_setup import agent, get_thread_id
 from messaging import (
@@ -59,7 +64,7 @@ async def configure_telegram_webhook():
     api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo"
     set_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook"
 
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
         # First check current webhook status
         resp = await client.get(api_url)
         info = resp.json()
@@ -152,11 +157,34 @@ async def process_and_reply(platform: str, user_identifier: str, user_text: str)
         if resolved_intent:
             user_text = resolved_intent
 
+    # Resolve the customer's mobile number so the LLM knows it without asking
+    if platform == "telegram":
+        customer_mobile = get_telegram_mobile(user_identifier)
+    else:
+        # WhatsApp: user_identifier IS the mobile number (with country code)
+        customer_mobile = user_identifier
+
     config = {"configurable": {"thread_id": thread_id}}
 
+    messages = []
+    if customer_mobile:
+        # Inject the known mobile number as system context so the LLM
+        # never asks the customer for it again during registration or lookup
+        messages.append({
+            "role": "system",
+            "content": (
+                f"The customer's mobile number is {customer_mobile}. "
+                f"Use this whenever you need their mobile for tools like "
+                f"register_client, get_client_type, place_order, etc. "
+                f"Do NOT ask the customer for their mobile number — you already have it."
+            )
+        })
+    messages.append({"role": "user", "content": user_text})
+
+    should_send_menu = True
     try:
         result = agent.invoke(
-            {"messages": [{"role": "user", "content": user_text}]},
+            {"messages": messages},
             config,
         )
         reply_text = result["messages"][-1].content
@@ -165,28 +193,42 @@ async def process_and_reply(platform: str, user_identifier: str, user_text: str)
         # flag the thread so the bot stops responding until a human clears it
         if "human_handover" in str(result["messages"][-2:]).lower():
             mark_handed_off(thread_id)
+            should_send_menu = False
 
     except Exception:
         logger.exception("Agent invocation failed for thread %s", thread_id)
         reply_text = ("Sorry, I ran into an issue processing that. "
                       "I'm connecting you with a human agent.")
         mark_handed_off(thread_id)
+        should_send_menu = False
 
     if platform == "whatsapp":
-        await send_whatsapp_message(user_identifier, reply_text)
+        send_reply_task = send_whatsapp_message(user_identifier, reply_text)
     elif platform == "telegram":
-        await send_telegram_message(user_identifier, reply_text)
+        send_reply_task = send_telegram_message(user_identifier, reply_text)
+    else:
+        send_reply_task = None
 
-    # Re-send the menu so buttons are visible for the next interaction
-    mobile_for_lookup = get_telegram_mobile(user_identifier) if platform == "telegram" else user_identifier
-    profile = classify_customer(mobile_for_lookup)
-    greeting, options = build_menu(profile, is_reply=True)
-    set_last_menu(thread_id, options)
+    if should_send_menu:
+        mobile_for_lookup = get_telegram_mobile(user_identifier) if platform == "telegram" else user_identifier
+        profile = classify_customer(mobile_for_lookup)
+        greeting, options = build_menu(profile, is_reply=True)
+        set_last_menu(thread_id, options)
 
-    if platform == "whatsapp":
-        await send_whatsapp_menu(user_identifier, greeting, options)
-    elif platform == "telegram":
-        await send_telegram_menu(user_identifier, greeting, options)
+        if platform == "whatsapp":
+            send_menu_task = send_whatsapp_menu(user_identifier, greeting, options)
+        elif platform == "telegram":
+            send_menu_task = send_telegram_menu(user_identifier, greeting, options)
+        else:
+            send_menu_task = None
+    else:
+        send_menu_task = None
+
+    if send_reply_task is not None:
+        if send_menu_task is not None:
+            await asyncio.gather(send_reply_task, send_menu_task)
+        else:
+            await send_reply_task
 
 
 def resolve_tapped_option(thread_id: str, option_id: str) -> str | None:

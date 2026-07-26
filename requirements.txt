@@ -4,6 +4,9 @@ httpx
 python-dotenv
 langchain
 langchain-ollama
+langchain-groq
+langsmith
 langgraph
 langgraph-checkpoint-postgres
 psycopg[binary]
+socksio
