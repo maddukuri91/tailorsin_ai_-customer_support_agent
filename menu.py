@@ -49,22 +49,40 @@ def _dedupe_by_id(options):
     return result
 
 
-def build_menu(profile: CustomerProfile):
+def build_menu(profile: CustomerProfile, is_reply: bool = False):
     """
     Returns (greeting_text, options) where options is a list of
     (id, label, intent) tuples, segment-specific options first, then
     common ones (deduped — e.g. 'faq' won't show twice for new_user).
+
+    Common options (book visit, manage address, talk to human) are only
+    shown to registered customers (active_client and client), not to
+    new/unregistered users.
+
+    If is_reply=True, uses a shorter prompt so the menu doesn't feel
+    repetitive after every interaction.
     """
     name_part = f", {profile.name}" if profile.name else ""
 
-    greetings = {
-        "active_client": f"Welcome back{name_part}! 👋 Looks like you have an order with us. What would you like to do?",
-        "client": f"Hi{name_part}! 👋 Great to see you again. What can I help you with today?",
-        "new_user": "Hi there! 👋 Welcome to Tailorsin — quick e-tailoring, pickup to delivery in 24 hours. How can I help?",
-    }
+    if is_reply:
+        greetings = {
+            "active_client": f"What else can I help you with{name_part}?",
+            "client": f"Anything else I can do for you{name_part}?",
+            "new_user": "Is there anything else you'd like to know?",
+        }
+    else:
+        greetings = {
+            "active_client": f"Welcome back{name_part}! 👋 Looks like you have an order with us. What would you like to do?",
+            "client": f"Hi{name_part}! 👋 Great to see you again. What can I help you with today?",
+            "new_user": "Hi there! 👋 Welcome to Tailorsin — quick e-tailoring, pickup to delivery in 24 hours. How can I help?",
+        }
     greeting = greetings.get(profile.segment, "Hi! 👋 How can I help you today?")
 
-    options = _dedupe_by_id(SEGMENT_OPTIONS.get(profile.segment, []) + COMMON_OPTIONS)
+    # Common options only for registered customers
+    if profile.segment == "new_user":
+        options = list(SEGMENT_OPTIONS.get("new_user", []))
+    else:
+        options = _dedupe_by_id(SEGMENT_OPTIONS.get(profile.segment, []) + COMMON_OPTIONS)
     return greeting, options
 
 
@@ -88,4 +106,21 @@ def resolve_typed_number(text: str, options):
         idx = int(text) - 1
         if 0 <= idx < len(options):
             return options[idx][2]  # intent
+    return None
+
+
+def resolve_option_id(option_id: str) -> str | None:
+    """
+    Look up an option ID across all segments and common options and return
+    its intent text. This is a fallback for when the in-memory _last_menu
+    is empty (e.g. after a server restart) — it ensures button taps still
+    resolve to a meaningful intent string even without session state.
+    """
+    for segment_options in SEGMENT_OPTIONS.values():
+        for opt_id, _label, intent in segment_options:
+            if opt_id == option_id:
+                return intent
+    for opt_id, _label, intent in COMMON_OPTIONS:
+        if opt_id == option_id:
+            return intent
     return None

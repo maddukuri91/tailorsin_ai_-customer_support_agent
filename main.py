@@ -18,6 +18,7 @@ Architecture:
 import logging
 from fastapi import FastAPI, Request, BackgroundTasks, Query, HTTPException
 from fastapi.responses import PlainTextResponse
+import httpx
 
 from agent_setup import agent, get_thread_id
 from messaging import (
@@ -32,8 +33,8 @@ from state import (
     set_telegram_mobile, get_telegram_mobile,
 )
 from customer_segment import classify_customer
-from menu import build_menu, resolve_typed_number
-from config import WHATSAPP_VERIFY_TOKEN
+from menu import build_menu, resolve_typed_number, resolve_option_id
+from config import WHATSAPP_VERIFY_TOKEN, TELEGRAM_BOT_TOKEN
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tailorsin_bot")
@@ -42,19 +43,68 @@ app = FastAPI(title="Tailorsin Support Bot")
 
 
 # ---------------------------------------------------------------------------
+# Startup: ensure Telegram webhook accepts callback_query updates
+# ---------------------------------------------------------------------------
+@app.on_event("startup")
+async def configure_telegram_webhook():
+    """
+    Ensure the Telegram webhook is set up to receive callback_query updates
+    (needed for inline button taps). Without this, Telegram only sends
+    'message' updates and button taps are silently dropped.
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        logger.warning("TELEGRAM_BOT_TOKEN not set — skipping webhook configuration.")
+        return
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+    set_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook"
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        # First check current webhook status
+        resp = await client.get(api_url)
+        info = resp.json()
+        logger.info("Current Telegram webhook info: %s", str(info.get("result", info))[:300])
+
+        result = info.get("result", {})
+        current_url = result.get("url", "")
+        current_allowed = result.get("allowed_updates", [])
+
+        if "callback_query" in current_allowed:
+            logger.info("Telegram webhook already accepts callback_query updates.")
+            return
+
+        if not current_url:
+            logger.warning("No Telegram webhook URL set. "
+                           "Set your webhook URL via Telegram API or configure it manually.")
+            return
+
+        # Update the existing webhook to include callback_query
+        resp = await client.post(set_url, json={
+            "url": current_url,
+            "allowed_updates": ["message", "callback_query", "edited_message"],
+        })
+        result = resp.json()
+        logger.info("Telegram webhook updated: url=%s, result=%s", current_url, result)
+
+
+# ---------------------------------------------------------------------------
 # Shared agent invocation logic
 # ---------------------------------------------------------------------------
-async def send_greeting_menu(platform: str, user_identifier: str, mobile_for_lookup: str) -> None:
+async def send_greeting_menu(platform: str, user_identifier: str, mobile_for_lookup: str,
+                              is_reply: bool = False) -> None:
     """
     Classifies the customer and sends the segmented menu. `mobile_for_lookup`
     is the actual phone number used to query the CRM — for WhatsApp this is
     the same as user_identifier; for Telegram (numeric chat_id, no phone by
     default) you'll need to have captured their mobile during registration
     and mapped it, otherwise this falls back to treating them as new_user.
+
+    If is_reply=True, uses a shorter prompt (e.g. "Anything else?") instead
+    of the full welcome greeting.
     """
     thread_id = get_thread_id(platform, user_identifier)
     profile = classify_customer(mobile_for_lookup)
-    greeting, options = build_menu(profile)
+    greeting, options = build_menu(profile, is_reply=is_reply)
 
     set_last_menu(thread_id, options)
     mark_greeted(thread_id)
@@ -82,8 +132,14 @@ async def process_and_reply(platform: str, user_identifier: str, user_text: str)
         )
         return
 
-    # First contact, or customer explicitly asked for the menu
-    if not has_been_greeted(thread_id) or is_menu_trigger(user_text):
+    # First contact — send greeting menu
+    if not has_been_greeted(thread_id):
+        mobile_for_lookup = get_telegram_mobile(user_identifier) if platform == "telegram" else user_identifier
+        await send_greeting_menu(platform, user_identifier, mobile_for_lookup=mobile_for_lookup)
+        return
+
+    # Customer explicitly asked for the menu — resend it
+    if is_menu_trigger(user_text):
         mobile_for_lookup = get_telegram_mobile(user_identifier) if platform == "telegram" else user_identifier
         await send_greeting_menu(platform, user_identifier, mobile_for_lookup=mobile_for_lookup)
         return
@@ -121,16 +177,28 @@ async def process_and_reply(platform: str, user_identifier: str, user_text: str)
     elif platform == "telegram":
         await send_telegram_message(user_identifier, reply_text)
 
+    # Re-send the menu so buttons are visible for the next interaction
+    mobile_for_lookup = get_telegram_mobile(user_identifier) if platform == "telegram" else user_identifier
+    profile = classify_customer(mobile_for_lookup)
+    greeting, options = build_menu(profile, is_reply=True)
+    set_last_menu(thread_id, options)
+
+    if platform == "whatsapp":
+        await send_whatsapp_menu(user_identifier, greeting, options)
+    elif platform == "telegram":
+        await send_telegram_menu(user_identifier, greeting, options)
+
 
 def resolve_tapped_option(thread_id: str, option_id: str) -> str | None:
     """Given a tapped button/list-row id, return its intent text, if known."""
+    # First try the in-memory last menu (fast path)
     options = get_last_menu(thread_id)
-    if not options:
-        return None
-    for opt_id, _label, intent in options:
-        if opt_id == option_id:
-            return intent
-    return None
+    if options:
+        for opt_id, _label, intent in options:
+            if opt_id == option_id:
+                return intent
+    # Fallback: look up the option ID globally (works even after server restart)
+    return resolve_option_id(option_id)
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +272,8 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
 async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     payload = await request.json()
 
+    logger.info("Telegram webhook received: %s", str(payload)[:500])
+
     # Inline button tap (from send_telegram_menu)
     callback_query = payload.get("callback_query")
     if callback_query:
@@ -211,6 +281,8 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         tapped_id = callback_query["data"]
         thread_id = get_thread_id("telegram", chat_id)
         intent = resolve_tapped_option(thread_id, tapped_id)
+        logger.info("Telegram callback_query: chat_id=%s, tapped_id=%s, resolved_intent=%s",
+                    chat_id, tapped_id, intent)
 
         background_tasks.add_task(answer_telegram_callback, callback_query["id"])
         background_tasks.add_task(process_and_reply, "telegram", chat_id, intent or tapped_id)
